@@ -1,8 +1,11 @@
 import json
 import time
 import sys
+import datetime
 
 from sqlalchemy import text
+
+import tornado.process
 
 from tornado.httpclient import AsyncHTTPClient, HTTPRequest
 import asyncio
@@ -18,14 +21,11 @@ num = int(sys.argv[1])
 
 AsyncHTTPClient.configure("tornado.curl_httpclient.CurlAsyncHTTPClient")
 
-
-start_time = time.time_ns()
+begin = datetime.datetime.now()
 
 async def create(agent_id):
     http_client = AsyncHTTPClient()
-    global start_time
     start_time = time.time_ns()
-    create_time = time.time_ns()
     url = f"http://10.152.216.101:8881/v3.0/agents/{agent_id}/attestations"
     headers = {"content-type": "application/json"}
     req_body = json.dumps({"supported_hash_algorithms": ["sha256"],
@@ -41,7 +41,7 @@ async def create(agent_id):
         if response.code != 200:
             print(f"Received {response.code} response for agent {agent_id}")
         else:
-            print(f"Received {response.code} response for agent {agent_id} ({format_time(end_time - create_time)})")
+            print(f"Received {response.code} response for agent {agent_id}")
     except Exception as e:
         print(f"Request for agent {agent_id} failed: {e}")
 
@@ -51,16 +51,15 @@ async def create(agent_id):
         if not isinstance(res_body, dict):
             print(f"Response received for agent {agent_id} is not valid JSON")
             exit()
-    total_create_time = time.time_ns() - create_time 
-    avg_create_time = format_time(total_create_time / num - 1)
-    print(f"Average time taken to create attestation per agent: {avg_create_time}")
+    end_time = time.time_ns()
+    create_time = end_time - start_time
+    print(f"create time for {agent_id} is", format_time(create_time)) 
 
 
 
 async def update(agent_id):
     http_client = AsyncHTTPClient()
-    global start_time
-    update_time = time.time_ns()
+    start_time = time.time_ns()
     url = f"http://10.152.216.101:8881/v3.0/agents/{agent_id}/attestations/latest"
     headers = {"content-type": "application/json"}
 
@@ -78,11 +77,10 @@ async def update(agent_id):
 
     try:
         response = await http_client.fetch(request, raise_error=False)
-        end_time = time.time_ns()
         if response.code != 200:
             print(f"Received {response.code} response for agent {agent_id}: {response.body.decode()}")
         else:
-            print(f"Received {response.code} response for agent {agent_id} ({format_time(end_time - update_time)})")
+            print(f"Received {response.code} response for agent {agent_id}")
     except Exception as e:
         print(f"Request for agent {agent_id} failed: {e}")
 
@@ -93,15 +91,10 @@ async def update(agent_id):
             print(f"Response received for agent {agent_id} is not valid JSON")
             exit()
     
-    total_update_time = time.time_ns() - update_time 
-    avg_update_time = format_time(total_update_time / num - 1)
-    print(f"Average time taken to update attestation per agent: {avg_update_time}")
-
-
     end_time = time.time_ns()
-    total_time = end_time - start_time
-    avg_time = format_time(total_time / num - 1)
-    print(f"Average time taken per agent: {avg_time}")
+    update_time = end_time - start_time
+    print(f"update time for {agent_id} is", format_time(update_time))
+
 
 def format_time(ns_elapsed) -> str:
     # pylint: disable=no-else-return
@@ -118,14 +111,31 @@ def format_time(ns_elapsed) -> str:
         return f"{round(ns_elapsed/1000000000)}s"
 
 async def main():
+    # tornado.process.fork_processes(2)
+    begin_create = time.time_ns()
     create_tasks = [ create(agent_id) for agent_id in range(1, num) ]
     await asyncio.gather(*create_tasks)
+    total_create = time.time_ns() - begin_create
+    
 
     with db_manager.engine.connect() as conn:
         conn.execute(text("UPDATE attestations SET nonce = :nonce"), nonce=bytes.fromhex("49beed365aac777dae23564f5ad0ec"))
 
+    begin_update = time.time_ns()
     update_tasks = [ update(agent_id) for agent_id in range(1, num) ]
     await asyncio.gather(*update_tasks)
+    total_update = time.time_ns() - begin_update
+    
+    print("\nTotal time taken to create", num - 1, "requests: ", format_time(total_create))
+    avg_create_time = format_time(total_create / num - 1)
+    print(f"Average time taken to create attestation per agent: {avg_create_time}")
+
+    print("\nTotal time taken to update", num - 1, "requests: ", format_time(total_update))
+    avg_update_time = format_time(total_update / num - 1)
+    print(f"Average time taken to update attestation per agent: {avg_update_time}")
+
+    print("\nTotal time taken to complete", num - 1, "requests: ", format_time(total_create + total_update))
+    print("\n Start time: ", begin, "\n End time: ", datetime.datetime.now())
 
 if __name__ == "__main__":
     asyncio.run(main())

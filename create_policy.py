@@ -7,10 +7,10 @@ logger = keylime_logging.init_logging("verifier")
 
 db_manager.make_engine("cloud_verifier")
 
-with open("ima.json", "r") as f:
+with open("runtime_policy.json", "r") as f:
     ima = json.load(f)
 
-with open("mb.json", "r") as f:
+with open("mb_refstate.json", "r") as f:
     mb = json.load(f)
 
 

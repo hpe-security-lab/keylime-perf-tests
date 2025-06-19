@@ -1,0 +1,5 @@
+.venv
+.vscode
+workspace.code-workspace
+
+/results

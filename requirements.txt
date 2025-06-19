@@ -1,0 +1,4 @@
+tornado>=6.4.0
+pycurl>=7.45.3
+sqlalchemy>=1.4.50
+psycopg2>=2.9.9

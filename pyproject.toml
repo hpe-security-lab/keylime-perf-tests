@@ -1,0 +1,8 @@
+[project]
+name = "Keylime Performance Testing Tools"
+authors = [
+    {name = "Jean Snyman"},
+    {name = "Supreshna Gurung"}
+]
+requires-python = ">= 3.12.3"
+license = "Apache-2.0"

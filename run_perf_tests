@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+
+# (C) Copyright 2024 Hewlett Packard Enterprise Development LP
+# Author: Jean Snyman <jean.snyman@hpe.com>
+# Author: Supreshna Gurung <supreshna.gurung@hpe.com>
+# SPDX-License-Identifier: Apache-2.0
+
+# Licensed under the Apache License, Version 2.0 (the "License"); you may
+# not use this file except in compliance with the License. You may obtain
+# a copy of the License at
+
+#     http://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations
+# under the License.
+
+import os
+import asyncio
+import sys
+import time
+import signal
+import traceback
+
+from concurrent.futures import ProcessPoolExecutor
+from sqlalchemy.exc import SQLAlchemyError
+
+from perf_tests.command_execution import CommandExecution
+from perf_tests.task_manager import TaskManager
+from perf_tests.mock_evidence import MockTPMQuote, MockUEFILog, MockIMALog
+from perf_tests.output import OutputHelpers
+from perf_tests.db import DB
+
+
+async def schedule_tasks(worker_index):
+    evidence = [MockTPMQuote(), MockUEFILog(), MockIMALog()]
+
+    while True:
+        try:
+            task = task_manager.new_task(worker_index, evidence)
+        except StopIteration:
+            break 
+
+        if not task:
+            if not task_manager.current_worker_tasks:
+                await asyncio.sleep(1)
+
+            for task in task_manager.current_worker_tasks:
+                await task.result()
+
+            task_manager.serializer.write_tasks()
+
+            continue
+
+        task.start_async()
+
+    for task in task_manager.current_worker_tasks:
+        await task.result()
+
+    await asyncio.sleep(1)
+
+    task_manager.serializer.write_tasks()
+
+    sys.exit(0)
+
+def start_event_loop(worker_index):
+    try:
+        asyncio.run(schedule_tasks(worker_index))
+    except Exception as exc:
+        print("\nAn unexpected exception occurred:")
+        msg = traceback.format_exception(exc)
+        msg = "".join(msg)
+
+        for line in msg.splitlines():
+            print(f"  {line}")
+
+        sys.exit(1)
+
+def set_global(*args):
+    global execution
+    global task_manager
+    execution = args[0]
+    task_manager = args[1]
+
+def make_signal_handler(executor):
+    parent_pid = os.getpid()
+
+    def handler(_sig, _frame):
+        # if os.getpid() != parent_pid:
+        #     # print(f"Remaining tasks ({os.getpid()}):")
+        #     for task in task_manager.current_worker_tasks:
+        #         print(task.render())
+
+        if os.getpid() == parent_pid:
+            print("\nWaiting for current tasks to finish...\n")
+            task_manager.disallow_new_tasks()
+
+            while True:
+                time.sleep(3)
+
+                if all(not agent.busy for agent in task_manager.agents):
+                    break
+                
+            executor.shutdown(wait=True)
+
+            print("\nPerforming clean up... ", end="", flush=True)
+
+            try:
+                time.sleep(3)
+                DB.tear_down()
+                print("DONE.")
+            except SQLAlchemyError as exc:
+                print("An unexpected exception occurred:")
+                msg = traceback.format_exception(exc)
+                msg = "".join(msg)
+
+                for line in msg.splitlines():
+                    print(f"  {line}")
+
+            print("\nGenerating report...\n")
+            task_manager.stats.print_all()
+            sys.exit(0)
+
+    return handler
+
+def main():
+    # Get user-provided options
+    execution = CommandExecution.parse_args()
+    # Initialise manager to track shared values across worker processes
+    task_manager = TaskManager(execution)
+    # Make these available from any function within this file
+    set_global(execution, task_manager)
+
+    # Print dependency versions for troubleshooting purposes
+    OutputHelpers.print_dependency_info()
+
+    # Clean up REST resources left over from previous executions and create new mock agents
+    print("Creating mock polcies, agents, etc... ", end="", flush=True)
+    DB.init_engine(execution)
+    DB.tear_down()
+    DB.set_up()
+    print("DONE.")
+
+    print(f"\nStarting {execution.worker_count} worker processes...\n")
+
+    with ProcessPoolExecutor(execution.worker_count, initializer=set_global, initargs=(execution, task_manager)) as executor:
+        # Add handler to terminate tasks and perform clean up when Ctrl+C or TERM signal is received
+        signal_handler = make_signal_handler(executor)
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+
+        for worker_index in range(execution.worker_count):
+            executor.submit(start_event_loop, worker_index)
+
+    os.kill(os.getpid(), signal.SIGTERM)
+
+if __name__ == "__main__":
+    main()
